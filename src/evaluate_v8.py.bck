@@ -1,0 +1,345 @@
+# code simplified version of v6_user_cluster
+import csv
+import sys
+import copy
+import getopt
+import time
+import progressbar
+import numpy as np
+import pandas as pd
+import ml_metrics as metric
+from scipy import stats
+from scipy.spatial import distance
+from sklearn import cross_validation as cv
+from sklearn.metrics.pairwise import pairwise_distances as pairdis
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+def accuracy_eval(rec_, test_):
+	return len(list(set(test_).intersection(rec_))) / float(len(test_))
+
+def diversity_eval(rec_, test_):
+	topics_rec = []
+	for movie in rec_:
+		topics_rec.append(topics_dic[:,1][np.where(topics_dic[:,0]==movie)[0]][0])
+	topics_rec = np.unique(topics_rec)
+	topics_test = []
+
+	for movie in test_:
+		topics_test.append(topics_dic[:,1][np.where(topics_dic[:,0]==movie)[0]][0])
+	topics_test = np.unique(topics_test)
+	
+	res = (len(topics_rec) - len(list(set(topics_test).intersection(topics_rec)))) / float(n_topics)
+	return res
+
+def evaluate(uid, type = 'w2v', n_train = 10, n_test = 10):
+	seq = np.array(user_d[uid]['seq'])
+	top = np.array(user_d[uid]['top'])
+	rat = np.array(user_d[uid]['rat']).astype(float)
+
+	rand_start = np.random.randint(len(seq) - (n_train+n_test))
+	train_ind = range(rand_start, rand_start+n_train)
+	train_seq = seq[train_ind]
+	train_rat = rat[train_ind]
+
+	test_ind = range(rand_start+n_train, rand_start+n_train+n_test)
+	test_seq = seq[test_ind]
+
+	if type=='w2v':
+		rec = recommend(train_seq)
+		res_acc = accuracy_eval(rec, test_seq)
+		res_div = diversity_eval(rec, test_seq)
+	
+		return res_acc, res_div
+
+	elif type=='knn':
+		k_ = 100
+		u_ind = np.where(user_ids==uid)[0][0]
+		knn_pred = copy.copy(rating_mat[u_ind])
+		user_sim = pairdis(rating_mat, metric='cosine')
+		knn_ind = np.argsort(user_sim[u_ind])[1:k_+1]
+		i_to_pred = np.where(rating_mat[u_ind]==0)[0]
+		knn_items = rating_mat[knn_ind][:,i_to_pred]
+		i_predicted = np.nan_to_num(np.true_divide(np.sum(knn_items,axis=0),np.count_nonzero(knn_items,axis=0)))
+		knn_pred[i_to_pred] = i_predicted
+		rec = item_ids[np.argsort(knn_pred)[::-1]][:n_rec].astype(str)
+		res_acc = accuracy_eval(rec, test_seq)
+		res_div = diversity_eval(rec, test_seq)
+
+		return res_acc, res_div
+
+	elif type=='cf':
+		u_ind = np.where(user_ids==uid)[0][0]
+		temp_cf_mat = copy.copy(rating_mat[u_ind])
+		rating_mat[u_ind] = np.zeros(rating_mat[u_ind].shape)
+		rating_mat[u_ind][np.where(np.isin(item_ids.astype(str), train_seq)==True)[0]] = train_rat
+		user_sim = pairdis(rating_mat, metric='cosine')
+		cf_pred = predict_cf(rating_mat, user_sim)
+		rec = item_ids[np.argsort(cf_pred[u_ind])[::-1]][:n_rec].astype(str)
+		res_acc = accuracy_eval(rec, test_seq)
+		res_div = diversity_eval(rec, test_seq)
+		rating_mat[user_ind] = temp_cf_mat
+
+		return res_acc, res_div
+
+	elif type=='rd':
+		rand_ind = np.random.choice(n_items_total, n_rec, replace=False)
+		rec = item_ids[rand_ind].astype(str)
+		res_acc = accuracy_eval(rec, test_seq)
+		res_div = diversity_eval(rec, test_seq)
+
+		return res_acc, res_div
+	
+def recommend(query_seq):
+	query_vec = np.zeros(wordvecs_d[int(query_seq[0])].shape)
+	movies = copy.copy(item_ids)
+	for q in query_seq:
+		query_vec += wordvecs_d[int(q)]
+		movies = np.delete(movies, np.where(movies==int(q))[0][0])
+
+	sims = np.zeros(movies.shape[0])
+	for i in range(len(movies)):
+		temp = 1 - distance.cosine(query_vec, wordvecs_d[movies[i]])
+		sims[i] += temp
+		
+	sim_vecs = np.hstack((movies.reshape(-1,1), sims.reshape(-1,1)))
+
+	res = sim_vecs[sim_vecs[:,1].astype('float32').argsort()[-n_rec:][::-1]][:,0]
+		
+	return res.astype(int).astype(str)
+
+def plot_user(accs_u, divs_u):
+	fig = plt.figure()
+	plt.title("User cluster")
+
+	line = copy.copy(user_c)
+	markers = ['bo', 'r^', 'gs', 'yx']
+	for i in range(len(user_c)):
+		line[i], = plt.plot(accs_u[user_c[i]], divs_u[user_c[i]], markers[i], ms=2, label=user_c[i])
+	
+	plt.ylabel('Diversity')
+	plt.xlabel('Accuracy')
+	plt.xlim(-0.1,1.1)
+	plt.ylim(-0.1,1.1)
+	plt.legend([l for l in line], [name for name in user_c])
+	fig.savefig("../results/["+do_eval_for+"]_eval_plot_u"+str(u_tested)+"_cv"+str(n_rep)+"_test"+str(n_test)+"_rec"+str(n_rec)+"_"+t_cluster+".png")
+	plt.gcf().clear()
+
+def plot_eval(accs, divs, u_tested):
+	fig = plt.figure()
+	plt.title("Accuracy vs Diversity")
+
+	line = copy.copy(test_methods)
+	markers = ['bo', 'r^', 'gs', 'yx']
+	for i in range(len(test_methods)):
+		line[i], = plt.plot(accs[test_methods[i]], divs[test_methods[i]], markers[i], ms=2, label=test_methods[i].upper())
+	
+	plt.ylabel('Diversity')
+	plt.xlabel('Accuracy')
+	plt.xlim(-0.1,1.1)
+	plt.ylim(-0.1,1.1)
+	plt.legend([l for l in line], [name.upper() for name in test_methods])
+	fig.savefig("../results/["+do_eval_for+"]_eval_plot_u"+str(u_tested)+"_cv"+str(n_rep)+"_test"+str(n_test)+"_rec"+str(n_rec)+"_"+t_cluster+".png")
+	plt.gcf().clear()
+
+def predict_cf(ratings, similarity):
+	mean_user_rating = ratings.mean(axis=1)
+	ratings_diff = (ratings - mean_user_rating[:, np.newaxis])
+	pred = mean_user_rating[:, np.newaxis] + similarity.dot(ratings_diff) / np.array([np.abs(similarity).sum(axis=1)]).T
+	return pred
+
+def gen_mat(data):
+	ret = np.zeros((n_users_total, n_items_total))
+
+	for line in data.itertuples():
+		ret[np.where(user_ids==line[1])[0][0], np.where(item_ids==line[2])[0][0]] = line[3]
+
+	return ret
+
+# main
+print "data loading..."
+start = time.time()
+seqs = list(csv.reader(open("../data/users2015_seq2.csv", 'r')))
+topics = list(csv.reader(open("../data/users2015_topic2.csv", 'r')))
+ratings = list(csv.reader(open("../data/users2015_rating2.csv", 'r')))
+wordvecs = pd.read_csv("../data/WordVectors2015.csv")
+topics_dic = np.array(list(csv.reader(open("../data/Topics_6.csv", 'r'))))
+user_cluster = np.array(list(csv.reader(open("../data/users2015_clusters.csv", 'r'))))
+
+header = ['user_id','item_id','rating']
+df = pd.read_csv("../data/cf_2015.csv", names=header)
+n_users_total = df.user_id.unique().shape[0]
+n_items_total = df.item_id.unique().shape[0]
+
+user_ids = np.sort(df.user_id.unique())
+item_ids = np.sort(df.item_id.unique())
+
+print "done\n",time.time() - start," elapsed"
+
+n_topics = 6
+n_rec = 50
+
+print "preprocessing..."
+start = time.time()
+wordvecs_d = dict()
+wordvecs_ = wordvecs.sort_values(by='movie_id').set_index('movie_id')
+for i in item_ids:
+	wordvecs_d[i] = wordvecs_.ix[i].as_matrix()
+
+topic_d = dict()
+for t in topics_dic:
+	topic_d[t[0]] = t[1]
+
+user_d = dict()
+for i in range(len(user_ids)):
+	user_d[user_ids[i]] = { 'seq' : seqs[i][1:], 'rat' : ratings[i][1:], 'top' : topics[i][1:] }
+
+print "preprocessing done\n",time.time() - start," elapsed"
+
+print "evaluating..."
+
+accs, divs, avg_u_acc, avg_u_div, accs_u, divs_u = {}, {}, {}, {}, {}, {}
+n_users_eval = 100
+n_rep = 20
+n_train = 10
+n_test = 20
+t_cluster = 'All'
+n_replace = 1
+do_eval_for = 'methods'		# evlauation for comparing among methods or user clusters 
+
+if do_eval_for == 'users':
+	n_user_cl = 1
+	if t_cluster == 'All':
+		user_train = []
+		for u in user_ids:
+			if len(user_d[u]['seq']) >= (n_train+n_test+1):
+				user_train.append(u)
+	
+	else:
+		cl_user_ids = user_ids[np.where(user_cluster[:,1]==t_cluster)[0]]
+	
+		user_train = []
+		for u in cl_user_ids:
+			if len(user_d[u]['seq']) >= (n_train+n_test+1):
+				user_train.append(u)
+
+	user_train = np.array(user_train)
+	cl_S = np.intersect1d(user_train, user_cluster[:,0][np.where(user_cluster[:,1]=='Stayer')[0]].astype(int))[:n_user_cl]
+	cl_N = np.intersect1d(user_train, user_cluster[:,0][np.where(user_cluster[:,1]=='Navigator')[0]].astype(int))[:n_user_cl]
+	cl_J = np.intersect1d(user_train, user_cluster[:,0][np.where(user_cluster[:,1]=='Jumper')[0]].astype(int))[:n_user_cl]
+	user_sample = np.hstack((cl_S, cl_N, cl_J))
+
+elif do_eval_for == 'methods':
+	user_train = []
+	for u in user_ids:
+		if len(user_d[u]['seq']) >= (n_train+n_test+1):
+			user_train.append(u)
+	
+	np.random.seed(10)
+	user_sample = np.random.choice(user_train, n_users_eval)
+	
+
+
+test_methods = ['w2v', 'knn', 'cf', 'rd']
+#test_methods = ['w2v','knn']
+user_c = ['Stayer', 'Navigator', 'Jumper']
+
+for method in test_methods:
+	accs[method] = []
+	divs[method] = []
+
+for u_type in user_c:
+	accs_u[u_type] = []
+	divs_u[u_type] = []
+
+rating_mat = gen_mat(df)
+
+for method in test_methods:
+	start = time.time()
+	u_tested = 0
+	for u in progressbar.progressbar(user_sample):
+		u_acc = 0.
+		u_div = 0.
+	
+		for _ in range(n_rep):
+			temp_acc, temp_div = evaluate(u, type = method)
+			u_acc += temp_acc
+			u_div += temp_div
+	
+		avg_u_acc[method] = u_acc / n_rep
+		avg_u_div[method] = u_div / n_rep
+		if do_eval_for == 'methods':
+			accs[method].append(avg_u_acc[method])
+			divs[method].append(avg_u_div[method])
+		else:
+			accs_u[user_cluster[u][1]].append(avg_u_acc[method])
+			divs_u[user_cluster[u][1]].append(avg_u_div[method])
+	
+		u_tested += 1
+	
+	print  method.upper(),"for CV",str(n_rep)+", user",u_tested,"done\t",time.time() - start,"elapsed"
+
+if do_eval_for == 'methods':
+	for method in test_methods:
+			print method.upper(),"result\n","Hit ratio :",np.mean(accs[method]),"\nDiversity :",np.mean(divs[method])
+
+	plot_eval(accs, divs, u_tested)
+
+	txtout = ""
+	for method in test_methods:
+		txtout += "For user "+t_cluster+"\n"+method.upper()+" result\n"+"Hit ratio : "+str(np.mean(accs[method]))+"\nDiversity :"+str(np.mean(divs[method]))+"\n"
+
+	for i in range(len(test_methods)):
+		if i == 0:
+			out = np.vstack((accs[test_methods[i]])).T
+			continue
+		out = np.vstack((out, accs[test_methods[i]]))
+	
+	for i in test_methods:
+		out = np.vstack((out, divs[i]))
+	
+	colname = []
+	for i in test_methods:
+		colname.append('acc_'+i)
+	for i in test_methods:
+		colname.append('div_'+i)
+	
+	out = np.vstack((colname, out.T))
+
+else:
+	for i in user_c:
+		print i.upper(),"result\n","Hit ratio :",np.mean(accs_u[i]),"\nDiversity :",np.mean(divs_u[i])
+
+	plot_user(accs_u, divs_u)
+
+	txtout = ""
+	for i in user_c:
+		txtout += "For user "+t_cluster+"\n"+i.upper()+" result\n"+"Hit ratio : "+str(np.mean(accs_u[i]))+"\nDiversity :"+str(np.mean(divs_u[i]))+"\n"
+
+	for i in range(len(user_c)):
+		if i == 0:
+			out = np.vstack((accs_u[user_c[i]])).T
+			continue
+		out = np.vstack((out, accs_u[user_c[i]]))
+	
+	for i in user_c:
+		out = np.vstack((out, divs_u[i]))
+	
+	colname = []
+	for i in user_c:
+		colname.append('acc_'+i)
+	for i in user_c:
+		colname.append('div_'+i)
+	
+	out = np.vstack((colname, out.T))
+
+
+txtname = "../results/["+do_eval_for+"]_eval_avg_u"+str(u_tested)+"_cv"+str(n_rep)+"_test"+str(n_test)+"_rec"+str(n_rec)+"_"+t_cluster+".txt"
+txtwriter = open(txtname, 'w')
+txtwriter.write(txtout)
+txtwriter.close()
+
+wr = csv.writer(open("../results/["+do_eval_for+"]_eval_collection_u"+str(u_tested)+"_cv"+str(n_rep)+"_test"+str(n_test)+"_rec"+str(n_rec)+"_"+t_cluster+".csv", 'w'))
+wr.writerows(out)
+
